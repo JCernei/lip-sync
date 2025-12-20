@@ -29,7 +29,6 @@ def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
 
     # Get video properties
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
 
     # Initialize list to store landmarks for all frames
     all_landmarks = []
@@ -159,12 +158,20 @@ def main():
 
     # Process all video files in the directory
     video_extensions = (".mp4", ".avi", ".mov", ".mkv")
+    total_errors = 0
     for filename in os.listdir(args.video_dir):
         if filename.lower().endswith(video_extensions):
             video_path = os.path.join(args.video_dir, filename)
-            process_video(
-                video_path, landmarks_extractor, args.output_dir, args.batch_size
-            )
+            try:
+                process_video(
+                    video_path, landmarks_extractor, args.output_dir, args.batch_size
+                )
+            except Exception as e:
+                total_errors += 1
+                print(f"Error processing {video_path}: {e}")
+
+    if total_errors > 0:
+        print(f"Finished processing videos with {total_errors} errors out of {len(os.listdir(args.video_dir))} files.")
 
 
 if __name__ == "__main__":

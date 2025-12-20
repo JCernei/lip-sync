@@ -1598,11 +1598,13 @@ def main(
         else:
             audio_paths = [filelist_audio]
 
-        if ".mp4" in audio_paths[0]:
+        if audio_paths and (".mp4" in audio_paths[0] or ".mp3" in audio_paths[0]):
             audio_paths = [
                 path.strip()
                 .replace(f"/{video_folder}", f"/{audio_emb_folder}")
                 .replace(".mp4", f"_{audio_emb_type}_emb.safetensors")
+                .replace(".wav", f"_{audio_emb_type}_emb.safetensors")
+                .replace(".mp3", f"_{audio_emb_type}_emb.safetensors")
                 for path in audio_paths
             ]
         else:
@@ -1610,6 +1612,7 @@ def main(
                 path.strip()
                 .replace(f"/{audio_folder}/", f"/{audio_emb_folder}/")
                 .replace(".wav", f"_{audio_emb_type}_emb.safetensors")
+                .replace(".mp3", f"_{audio_emb_type}_emb.safetensors")
                 for path in audio_paths
             ]
     else:
@@ -1617,6 +1620,7 @@ def main(
             video_path.replace(f"/{video_folder}", f"/{audio_emb_folder}")
             .replace(".mp4", f"_{audio_emb_type}_emb.safetensors")
             .replace(".wav", f"_{audio_emb_type}_emb.safetensors")
+            .replace(".mp3", f"_{audio_emb_type}_emb.safetensors")
             for video_path in video_paths
         ]
 

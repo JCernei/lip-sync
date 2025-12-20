@@ -1611,7 +1611,6 @@ def main(
         model_size="Base+",
         feed_as_frames=False,
         merge_type="None",
-        model_path="/vol/paramonos2/projects/antoni/code/Personal/code_prep/keysync/pretrained_models/checkpoints/WavLM-Base+.pt",
     ).cuda()
     vae_model = VaeWrapper("video")
     landmarks_model = LandmarksExtractor()
@@ -1645,17 +1644,17 @@ def main(
 
             # Remove the newline character from each path
             audio_paths = [path.strip() for path in audio_paths]
-        elif filelist_audio.endswith(".wav") or filelist_audio.endswith(".mp4"):
+        elif filelist_audio.endswith(".wav") or filelist_audio.endswith(".mp4") or filelist_audio.endswith(".mp3"):
             audio_paths = [filelist_audio]
         else:
             audio_paths = os.listdir(filelist_audio)
             audio_paths = [
                 os.path.join(filelist_audio, path)
                 for path in audio_paths
-                if path.endswith(".wav") or path.endswith(".mp4")
+                if path.endswith(".wav") or path.endswith(".mp4") or path.endswith(".mp3")
             ]
 
-        if ".mp4" in audio_paths[0]:
+        if audio_paths and (".mp4" in audio_paths[0] or ".wav" in audio_paths[0]):
             audio_paths = [
                 path.strip().replace(f"/{video_folder}", f"/{audio_folder}")
                 for path in audio_paths

@@ -41,8 +41,10 @@ class WavLM_wrapper(nn.Module):
         super().__init__()
         assert model_size in ["Base+", "Large"]
         if model_path is None:
-            model_path = os.path.join(os.path.dirname(__file__), f"WavLM-{model_size}.pt")
+            model_path = os.path.join(os.getcwd(), "pretrained_models", "checkpoints", f"WavLM-{model_size}.pt")
+        
         if not os.path.exists(model_path):
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
             self.download_model(model_path, model_size)
         checkpoint = torch.load(model_path)
         cfg = WavLMConfig(checkpoint["cfg"])

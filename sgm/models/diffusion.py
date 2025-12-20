@@ -221,13 +221,13 @@ class DiffusionEngine(pl.LightningModule):
     ) -> None:
         print(f"Restoring from {path}")
         if path.endswith("ckpt"):
-            sd = torch.load(path, map_location="cpu")["state_dict"]
+            sd = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
         elif path.endswith("pt"):
-            sd = torch.load(path, map_location="cpu")["module"]
+            sd = torch.load(path, map_location="cpu", weights_only=False)["module"]
             # Remove leading _forward_module from keys
             sd = {k.replace("_forward_module.", ""): v for k, v in sd.items()}
         elif path.endswith("bin"):
-            sd = torch.load(path, map_location="cpu")
+            sd = torch.load(path, map_location="cpu", weights_only=False)
             # Remove leading _forward_module from keys
             sd = {k.replace("_forward_module.", ""): v for k, v in sd.items()}
         elif path.endswith("safetensors"):

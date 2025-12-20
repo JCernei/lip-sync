@@ -77,29 +77,65 @@ audio_emb_dir="audio_emb"
 filelist="filelist_inference.txt"
 filelist_audio="filelist_inference_audio.txt"
 
+# Step 0: Pre-process video and audio
+echo "Step 0: Pre-processing video and audio..."
 
-echo "Step 1: Computing video embeddings..."
+# Create new directories for processed files
+video_dir_25fps="${video_dir}_25fps"
+audio_dir_16k="${audio_dir}_16k"
+mkdir -p "$video_dir_25fps"
+mkdir -p "$audio_dir_16k"
+
+# Convert videos to 25 fps and audios to 16000 Hz using the Python script
+echo "Converting videos to 25 fps and audios to 16000 Hz..."
+python $util_dir/ffmpeg_converter.py \
+    --video_dir "$video_dir" \
+    --video_dir_25fps "$video_dir_25fps" \
+    --audio_dir "$audio_dir" \
+    --audio_dir_16k "$audio_dir_16k"
+
+if [ $? -ne 0 ]; then
+    echo "ffmpeg_converter.py failed. Exiting." >&2
+    exit 1
+fi
+
+# Update variables to point to the new directories
+video_dir="$video_dir_25fps"
+audio_dir="$audio_dir_16k"
+
+echo "Pre-processing complete. Using processed files from $video_dir and $audio_dir"
+
+
+echo "Step 1: Computing landmarks..."
+python $util_dir/gen_landmarks.py \
+    $video_dir \
+    --output_dir "landmarks_25fps" \
+    --batch_size 10
+
+video_dir_cropped="${video_dir}_cropped"
+
+echo "Step 2: Cropping video..."
+python $util_dir/crop_video.py \
+    --video_dir "$video_dir" \
+    --video_dir_cropped "$video_dir_cropped" \
+    --landmarks_dir "landmarks_25fps" \
+    --landmarks_dir_cropped "landmarks_25fps_cropped" \
+
+video_dir="$video_dir_cropped"
+
+echo "Step 3: Computing video embeddings..."
 python $util_dir/video_to_latent.py \
     --filelist "$video_dir" \
 
-echo "Step 2: Computing landmarks..."
-python $util_dir/gen_landmarks.py \
-    $video_dir \
-    --output_dir "landmarks" \
-    --batch_size 10
+echo "Step 4: Computing audio embeddings..."
+for model_type in wavlm hubert; do
+    python $util_dir/get_audio_embeddings.py \
+        --audio_path "$audio_dir/*.wav" \
+        --model_type $model_type \
+        --skip_video
+done
 
-echo "Step 3: Computing audio embeddings..."
-python $util_dir/get_audio_embeddings.py \
-    --audio_path "$audio_dir/*.wav" \
-    --model_type wavlm \
-    --skip_video
-
-python $util_dir/get_audio_embeddings.py \
-    --audio_path "$audio_dir/*.wav" \
-    --model_type hubert \
-    --skip_video
-
-echo "Step 4: Creating filelist for inference..."
+echo "Step 5: Creating filelist for inference..."
 python $util_dir/create_filelist.py \
     --root_dir $video_dir \
     --dest_file $filelist \
@@ -110,7 +146,7 @@ python $util_dir/create_filelist.py \
     --dest_file $filelist_audio \
     --ext ".wav"
 
-echo "Step 5: Running inference..."
+echo "Step 6: Running inference..."
 $script_dir/inference.sh \
     --output_folder "$output_folder" \
     --file_list "$filelist" \
