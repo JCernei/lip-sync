@@ -27,7 +27,7 @@ def main(input_video_dir, output_video_dir, input_landmarks_dir, output_landmark
 
     video_files = [f for f in os.listdir(input_video_dir) if f.endswith('.mp4')]
 
-    video_preprocessor = VideoPreProcessor()
+    video_preprocessor = VideoPreProcessor(crop_type="union")
     
     for video_file in tqdm(video_files, desc="Processing videos", total=len(video_files)):
         input_video_path = os.path.join(input_video_dir, video_file)

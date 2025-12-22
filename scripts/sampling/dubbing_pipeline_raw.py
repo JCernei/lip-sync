@@ -48,6 +48,15 @@ try:
 except ImportError:
     print("SAM2 is not installed, occlusion handling won't work")
 
+try:
+    from transformers import Sam3VideoModel, Sam3VideoProcessor  # noqa
+    from transformers.video_utils import load_video  # noqa
+    from accelerate import Accelerator  # noqa
+    SAM3_AVAILABLE = True
+except ImportError:
+    print("SAM3 is not installed, enhanced occlusion handling won't work")
+    SAM3_AVAILABLE = False
+
 
 def get_segmentation_mask_arms(
     video_path: str,
@@ -109,6 +118,134 @@ def get_segmentation_mask_arms(
     # Interpolate mask to target size
     mask = torch.from_numpy(mask).float()
     mask = F.interpolate(mask.unsqueeze(1), size=target_size, mode="nearest").squeeze(1)
+    mask = mask.numpy()
+
+    return mask
+
+
+def get_segmentation_mask_arms_sam3(
+    video_path: str,
+    ann_frame_idx: int,
+    position: Optional[List[float]] = None,
+    text_prompt: Optional[str] = None,
+    video_len: int = None,
+    video_size: Tuple[int, int] = None,
+    target_size: Tuple[int, int] = (64, 64),
+) -> np.ndarray:
+    """
+    Generate a segmentation mask for arms using SAM3 from transformers.
+
+    Args:
+        video_path: Path to the video file
+        ann_frame_idx: Frame index for annotation
+        position: Position to place the annotation point [x, y] (optional if text_prompt provided)
+        text_prompt: Text description of object to segment (e.g., "arm", "hand", "person")
+        video_len: Length of the video in frames
+        video_size: Size of the video frames (height, width)
+        target_size: Target size for the output mask
+
+    Returns:
+        Segmentation mask for arms region
+    """
+    if not SAM3_AVAILABLE:
+        raise ImportError(
+            "SAM3 is not installed. Install with: pip install transformers accelerate"
+        )
+
+    if position is None and text_prompt is None:
+        raise ValueError("Either 'position' (coordinates) or 'text_prompt' must be provided")
+
+    device = Accelerator().device
+    print(f"Using device: {device}")
+
+    # Load SAM3 model and processor
+    print("Loading SAM3 model...")
+    model = Sam3VideoModel.from_pretrained("facebook/sam3").to(
+        device, dtype=torch.bfloat16
+    )
+    processor = Sam3VideoProcessor.from_pretrained("facebook/sam3")
+
+    # Load video frames
+    print(f"Loading video from: {video_path}")
+    video_frames, _ = load_video(video_path)
+    video_frames = torch.from_numpy(video_frames).to(device)  # Shape: (T, C, H, W) or (T, H, W, C)
+
+    # Ensure correct shape: (T, C, H, W)
+    if video_frames.shape[1] not in [3, 4]:  # If not channels dimension
+        video_frames = video_frames.permute(0, 3, 1, 2)  # Convert (T, H, W, C) to (T, C, H, W)
+
+    print(f"Video shape: {video_frames.shape}")
+
+    # Initialize video inference session
+    print("Initializing video inference session...")
+    inference_session = processor.init_video_session(
+        video=video_frames,
+        inference_device=device,
+        processing_device="cpu",
+        video_storage_device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    # Add prompt - either text or point
+    if text_prompt is not None:
+        print(f"Adding text prompt: '{text_prompt}'")
+        inference_session = processor.add_text_prompt(
+            inference_session=inference_session,
+            text=text_prompt,
+        )
+    else:
+        print(f"Adding point prompt at position: {position}")
+        inference_session = processor.add_point_prompt(
+            inference_session=inference_session,
+            frame_idx=ann_frame_idx,
+            point_coords=np.array([[position]], dtype=np.float32),  # (1, 1, 2)
+            point_labels=np.array([[1]], dtype=np.int32),  # Positive label
+        )
+
+    # Process all frames in the video
+    print("Propagating through video frames...")
+    mask = np.zeros((video_len, video_size[0], video_size[1]), dtype=np.float32)
+    
+    outputs_per_frame = {}
+    for model_outputs in model.propagate_in_video_iterator(
+        inference_session=inference_session, max_frame_num_to_track=video_len
+    ):
+        frame_idx = model_outputs.frame_idx
+        
+        # Process the outputs
+        processed_outputs = processor.postprocess_outputs(
+            inference_session, model_outputs
+        )
+        
+        if processed_outputs["masks"] is not None:
+            # Get the first object's mask
+            obj_mask = processed_outputs["masks"][0]  # (H, W)
+            
+            # Resize to video size if needed
+            if obj_mask.shape != video_size:
+                obj_mask = torch.from_numpy(obj_mask).float().unsqueeze(0).unsqueeze(0)
+                obj_mask = F.interpolate(
+                    obj_mask, size=video_size, mode="nearest"
+                ).squeeze(0).squeeze(0).numpy()
+            
+            mask[frame_idx] = obj_mask
+        
+        outputs_per_frame[frame_idx] = processed_outputs
+
+    print(f"Processed {len(outputs_per_frame)} frames")
+
+    # Fill backward if needed (from annotation frame to start)
+    if ann_frame_idx > 0 and np.sum(mask[ann_frame_idx]) > 0:
+        for frame_idx in range(ann_frame_idx - 1, -1, -1):
+            if np.sum(mask[frame_idx]) == 0:  # If frame not processed
+                # Use the mask from the next frame
+                mask[frame_idx] = mask[frame_idx + 1]
+
+    # Interpolate mask to target size
+    mask = torch.from_numpy(mask).float()
+    mask = F.interpolate(
+        mask.unsqueeze(1), size=target_size, mode="nearest"
+    ).squeeze(1)
     mask = mask.numpy()
 
     return mask
@@ -937,7 +1074,9 @@ def sample(
     extra_naming: str = "",
     what_mask: str = "box",
     fix_occlusion: bool = False,
+    fix_occlusion_pro: bool = False,
     position: Optional[List[float]] = None,
+    text_prompt: Optional[str] = None,
     start_frame: int = 0,
     gt_as_cond: bool = False,
     nose_index: int = 28,
@@ -1101,6 +1240,7 @@ def sample(
 
     mask_arms = None
     if fix_occlusion:
+        print("Using SAM2 for occlusion fixing...")
         mask_arms = get_segmentation_mask_arms(
             video_path,
             start_frame,
@@ -1113,6 +1253,26 @@ def sample(
         if save_occlusion_mask:
             video_name = os.path.basename(video_path).replace(".mp4", "")
             output_path = f"/vol/paramonos2/projects/antoni/code/Personal/keyface/outputs/{video_name}_mask_arms.npy"
+            np.save(output_path, mask_arms)
+
+        mask_arms = mask_arms[:max_frames]
+    
+    elif fix_occlusion_pro:
+        print("Using SAM3 for enhanced occlusion fixing...")
+        mask_arms = get_segmentation_mask_arms_sam3(
+            video_path=video_path,
+            ann_frame_idx=start_frame,
+            position=position,
+            text_prompt=text_prompt,
+            video_len=original_len,
+            video_size=(h, w),
+            target_size=(64, 64),
+        )
+
+        if save_occlusion_mask:
+            video_name = os.path.basename(video_path).replace(".mp4", "")
+            output_path = f"outputs/{video_name}_mask_arms_sam3.npy"
+            os.makedirs("outputs", exist_ok=True)
             np.save(output_path, mask_arms)
 
         mask_arms = mask_arms[:max_frames]
@@ -1531,7 +1691,9 @@ def main(
     mix_audio: bool = False,
     what_mask: str = "box",
     fix_occlusion: bool = False,
+    fix_occlusion_pro: bool = False,
     position: Optional[List[float]] = None,
+    text_prompt: Optional[str] = None,
     start_frame: int = 0,
     gt_as_cond: bool = False,
     nose_index: int = 28,
@@ -1716,7 +1878,9 @@ def main(
                 else "",
                 what_mask=what_mask,
                 fix_occlusion=fix_occlusion,
+                fix_occlusion_pro=fix_occlusion_pro,
                 position=position,
+                text_prompt=text_prompt,
                 start_frame=start_frame,
                 gt_as_cond=gt_as_cond,
                 nose_index=nose_index,

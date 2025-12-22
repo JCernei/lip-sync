@@ -421,12 +421,8 @@ def ensure_landmarks_shape(batch_landmarks, all_landmarks):
                     key=lambda idx: abs(idx - len(all_landmarks) - i),
                 )
                 batch_landmarks[i] = all_landmarks[closest_idx]
-            elif (
-                len(batch_landmarks) > i + 1
-                and batch_landmarks[i + 1] is not None
-                and len(batch_landmarks[i + 1]) > 0
-            ):
-                # Use the next valid landmark in the current batch if available
+            else:
+                # Look ahead in current batch for valid landmarks
                 next_valid_idx = next(
                     (
                         j
@@ -439,13 +435,8 @@ def ensure_landmarks_shape(batch_landmarks, all_landmarks):
                 if next_valid_idx is not None:
                     batch_landmarks[i] = batch_landmarks[next_valid_idx]
                 else:
-                    # If no valid landmarks found, set an error
-                    raise ValueError("Error: No valid landmarks found")
+                    # If no valid landmarks found, use zeros as fallback
                     batch_landmarks[i] = np.zeros((68, 2))
-            else:
-                # If no valid landmarks found, set an error
-                raise ValueError("Error: No valid landmarks found")
-                batch_landmarks[i] = np.zeros((68, 2))
 
         # If multiple faces detected, use the first one
         if isinstance(batch_landmarks[i], list) and len(batch_landmarks[i]) > 0:
@@ -453,7 +444,7 @@ def ensure_landmarks_shape(batch_landmarks, all_landmarks):
 
         # Ensure the landmark has the correct shape (68x2)
         if batch_landmarks[i].shape != (68, 2):
-            # If the shape is wrong, use the closest valid landmark or set an error
+            # If the shape is wrong, use the closest valid landmark or look ahead in batch
             valid_indices = [
                 j
                 for j, lm in enumerate(all_landmarks)
@@ -466,7 +457,23 @@ def ensure_landmarks_shape(batch_landmarks, all_landmarks):
                 )
                 batch_landmarks[i] = all_landmarks[closest_idx]
             else:
-                raise ValueError("Error: No valid landmarks with shape (68, 2)")
-                batch_landmarks[i] = np.zeros((68, 2))
+                # Look ahead in current batch for valid landmarks
+                future_valid_idx = next(
+                    (
+                        j
+                        for j in range(i + 1, len(batch_landmarks))
+                        if (
+                            batch_landmarks[j] is not None
+                            and hasattr(batch_landmarks[j], "shape")
+                            and batch_landmarks[j].shape == (68, 2)
+                        )
+                    ),
+                    None,
+                )
+                if future_valid_idx is not None:
+                    batch_landmarks[i] = batch_landmarks[future_valid_idx]
+                else:
+                    # Use zero landmarks as last resort
+                    batch_landmarks[i] = np.zeros((68, 2))
 
     return batch_landmarks

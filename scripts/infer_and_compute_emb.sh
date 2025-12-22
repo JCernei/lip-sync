@@ -37,10 +37,18 @@ while [[ $# -gt 0 ]]; do
             fix_occlusion="${2:-false}"
             shift 2
             ;;
+        --fix_occlusion_pro)
+            fix_occlusion_pro="${2:-false}"
+            shift 2
+            ;;
         --position)
             position="${2:-None}"
             shift 2
             ;;
+        --text_prompts)
+            text_prompts="${2:-None}"
+            shift 2
+            ;; 
         --start_frame)
             start_frame="${2:-0}"
             shift 2
@@ -58,7 +66,9 @@ echo "keyframes_ckpt: $keyframes_ckpt"
 echo "interpolation_ckpt: $interpolation_ckpt"
 echo "compute_until: $compute_until"
 echo "fix_occlusion: $fix_occlusion"
+echo "fix_occlusion_pro: $fix_occlusion_pro"
 echo "position: $position"
+echo "text_prompts: ${text_prompts[@]:-None}"
 echo "start_frame: $start_frame"
 
 # Set defaults if not provided
@@ -155,7 +165,9 @@ $script_dir/inference.sh \
     --compute_until "$compute_until" \
     --file_list_audio "$filelist_audio" \
     --fix_occlusion "$fix_occlusion" \
+    --fix_occlusion_pro "$fix_occlusion_pro" \
     --position "$position" \
+    --text_prompts "${text_prompts}" \
     --start_frame "$start_frame"
 
 echo "Inference pipeline completed successfully!"

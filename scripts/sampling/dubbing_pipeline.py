@@ -42,6 +42,15 @@ try:
 except ImportError:
     print("SAM2 is not installed, occlusion handling won't work")
 
+try:
+    from transformers import Sam3VideoModel, Sam3VideoProcessor  # noqa
+    from transformers.video_utils import load_video  # noqa
+    from accelerate import Accelerator  # noqa
+    SAM3_AVAILABLE = True
+except ImportError:
+    print("SAM3 is not installed, enhanced occlusion handling won't work")
+    SAM3_AVAILABLE = False
+
 
 def get_segmentation_mask_arms(
     video_path: str,
@@ -49,7 +58,7 @@ def get_segmentation_mask_arms(
     position: List[float],
     video_len: int,
     video_size: Tuple[int, int],
-    target_size: Tuple[int, int] = (64, 64),
+    target_size: Tuple[int, int] = (512, 512),
 ) -> np.ndarray:
     """
     Generate a segmentation mask for arms using SAM2.
@@ -108,11 +117,171 @@ def get_segmentation_mask_arms(
     return mask
 
 
+def get_segmentation_mask_arms_sam3(
+    video_path: str,
+    ann_frame_idx: int,
+    position: Optional[List[float]] = None,
+    text_prompts: Optional[List[str]] = None,
+    video_len: int = None,
+    video_size: Tuple[int, int] = None,
+) -> np.ndarray:
+    """
+    Generate segmentation masks using SAM3 from transformers.
+
+    Args:
+        video_path: Path to the video file
+        ann_frame_idx: Frame index for annotation
+        position: Position to place the annotation point [x, y] (optional if text_prompts provided)
+        text_prompts: List of text descriptions to segment (e.g., ["microphone", "hands"])
+        video_len: Length of the video in frames
+        video_size: Size of the video frames (height, width)
+
+    Returns:
+        Segmentation masks, shape (n_prompts, T, H, W) at full video resolution
+    """
+    if not SAM3_AVAILABLE:
+        raise ImportError(
+            "SAM3 is not installed. Install with: pip install transformers accelerate"
+        )
+
+    if position is None and (text_prompts is None or len(text_prompts) == 0):
+        raise ValueError("Either 'position' (coordinates) or 'text_prompts' must be provided")
+
+    device = Accelerator().device
+    print(f"Using device: {device}")
+
+    # Load SAM3 model and processor
+    print("Loading SAM3 model...")
+    model = Sam3VideoModel.from_pretrained("facebook/sam3").to(
+        device, dtype=torch.bfloat16
+    )
+    processor = Sam3VideoProcessor.from_pretrained("facebook/sam3")
+
+    # Load video frames
+    print(f"Loading video from: {video_path}")
+    video_frames, _ = load_video(video_path)
+    video_frames = torch.from_numpy(video_frames).to(device)  # Shape: (T, C, H, W) or (T, H, W, C)
+
+    # Ensure correct shape: (T, C, H, W)
+    if video_frames.shape[1] not in [3, 4]:  # If not channels dimension
+        video_frames = video_frames.permute(0, 3, 1, 2)  # Convert (T, H, W, C) to (T, C, H, W)
+
+    print(f"Video shape: {video_frames.shape}")
+
+    # Initialize video inference session
+    print("Initializing video inference session...")
+    inference_session = processor.init_video_session(
+        video=video_frames,
+        inference_device=device,
+        processing_device="cpu",
+        video_storage_device="cpu",
+        dtype=torch.bfloat16,
+    )
+
+    # Add prompt - either text or point
+    if text_prompts is not None and len(text_prompts) > 0:
+        print(f"Adding text prompts: {text_prompts}")
+        for text in text_prompts:
+            inference_session = processor.add_text_prompt(
+                inference_session=inference_session,
+                text=text,
+            )
+    else:
+        print(f"Adding point prompt at position: {position}")
+        inference_session = processor.add_point_prompt(
+            inference_session=inference_session,
+            frame_idx=ann_frame_idx,
+            point_coords=np.array([[position]], dtype=np.float32),  # (1, 1, 2)
+            point_labels=np.array([[1]], dtype=np.int32),  # Positive label
+        )
+
+    # Process all frames in the video
+    print("Propagating through video frames...")
+    n_prompts = len(text_prompts) if text_prompts else 1
+    mask = np.zeros((n_prompts, video_len, video_size[0], video_size[1]), dtype=np.float32)
+    
+    outputs_per_frame = {}
+    frame_count = 0
+    max_masks = 0  # Track the maximum number of masks returned
+    
+    for model_outputs in model.propagate_in_video_iterator(
+        inference_session=inference_session, max_frame_num_to_track=video_len
+    ):
+        frame_idx = model_outputs.frame_idx
+        frame_count += 1
+        
+        if frame_count % 10 == 0:
+            print(f"  Processed {frame_count} frames...")
+        
+        # Process the outputs
+        processed_outputs = processor.postprocess_outputs(
+            inference_session, model_outputs
+        )
+        
+        if processed_outputs["masks"] is not None:
+            # Get all object masks
+            obj_masks = processed_outputs["masks"]  # (n_masks, H, W)
+            max_masks = max(max_masks, len(obj_masks))
+    
+    # If SAM3 returned more masks than expected, expand the mask array
+    if max_masks > n_prompts:
+        print(f"Warning: SAM3 returned {max_masks} masks but only {n_prompts} prompts were provided")
+        print(f"Expanding mask array to {max_masks}")
+        new_mask = np.zeros((max_masks, video_len, video_size[0], video_size[1]), dtype=np.float32)
+        new_mask[:n_prompts] = mask
+        mask = new_mask
+        n_prompts = max_masks
+    
+    # Second pass: fill in the masks
+    frame_count = 0
+    for model_outputs in model.propagate_in_video_iterator(
+        inference_session=inference_session, max_frame_num_to_track=video_len
+    ):
+        frame_idx = model_outputs.frame_idx
+        frame_count += 1
+        
+        # Process the outputs
+        processed_outputs = processor.postprocess_outputs(
+            inference_session, model_outputs
+        )
+        
+        if processed_outputs["masks"] is not None:
+            # Get all object masks
+            obj_masks = processed_outputs["masks"]  # (n_masks, H, W)
+            
+            for mask_idx, obj_mask in enumerate(obj_masks):
+                # Resize to video size if needed
+                if obj_mask.shape != video_size:
+                    obj_mask = torch.from_numpy(obj_mask).float().unsqueeze(0).unsqueeze(0)
+                    obj_mask = F.interpolate(
+                        obj_mask, size=video_size, mode="nearest"
+                    ).squeeze(0).squeeze(0).numpy()
+                else:
+                    # Convert to numpy and ensure it's on CPU
+                    if isinstance(obj_mask, torch.Tensor):
+                        obj_mask = obj_mask.cpu().numpy()
+                
+                mask[mask_idx, frame_idx] = obj_mask
+        
+        outputs_per_frame[frame_idx] = processed_outputs
+
+    print(f"Processed {frame_count} total frames")
+
+    # Fill backward if needed
+    for mask_idx in range(n_prompts):
+        if ann_frame_idx > 0 and np.sum(mask[mask_idx, ann_frame_idx]) > 0:
+            for frame_idx in range(ann_frame_idx - 1, -1, -1):
+                if np.sum(mask[mask_idx, frame_idx]) == 0:
+                    mask[mask_idx, frame_idx] = mask[mask_idx, frame_idx + 1]
+
+    return mask
+
+
 def load_landmarks(
     landmarks: np.ndarray,
     original_size: Tuple[int, int],
     index: int,
-    target_size: Tuple[int, int] = (64, 64),
+    target_size: Tuple[int, int] = (512, 512),
     is_dub: bool = True,
     what_mask: str = "box",
     nose_index: int = 28,
@@ -322,8 +491,21 @@ def create_pipeline_inputs(
             nose_index=nose_index,
         )
         if mask_arms is not None:
+            # mask_arms shape: (n_prompts, T, H, W) at full resolution (512, 512)
+            # masks shape: (T, 1, 64, 64) at latent space resolution
+            # Aggregate all prompts into a single mask (union of all detected regions)
+            mask_arms_segment = mask_arms[:, i:segment_end]  # (n_prompts, segment_len, H, W)
+            mask_arms_combined = np.max(mask_arms_segment, axis=0)  # (segment_len, H, W)
+            
+            # Resize mask_arms to match masks resolution (64, 64)
+            mask_arms_resized = torch.from_numpy(mask_arms_combined).float().unsqueeze(1)  # (T, 1, H, W)
+            mask_arms_resized = F.interpolate(
+                mask_arms_resized, size=(64, 64), mode="nearest"
+            ).numpy().squeeze(1)  # (T, 64, 64)
+            
+            # Apply mask: exclude the occlusion regions
             masks = np.logical_and(
-                masks, np.logical_not(mask_arms[i:segment_end, None, ...])
+                masks, np.logical_not(mask_arms_resized[:, None, ...])
             )
         masks_interpolation_chunks.append(masks)
 
@@ -895,7 +1077,9 @@ def sample(
     extra_naming: str = "",
     what_mask: str = "box",
     fix_occlusion: bool = False,
+    fix_occlusion_pro: bool = False,
     position: Optional[List[float]] = None,
+    text_prompts: Optional[List[str]] = None,
     start_frame: int = 0,
     gt_as_cond: bool = False,
     nose_index: int = 28,
@@ -925,6 +1109,32 @@ def sample(
         )
     else:
         raise ValueError(f"Version {version} does not exist.")
+
+    # # Ensure num_frames is an integer (Fire may pass it as string)
+    # if isinstance(num_frames, str):
+    #     try:
+    #         num_frames = int(num_frames)
+    #     except ValueError:
+    #         # If num_frames is not a valid integer, it might have been grabbed from text_prompts
+    #         # This can happen with Fire's argument parsing. Reset to default and extract text_prompts
+    #         print(f"Warning: num_frames received invalid value: {num_frames}. Resetting to default.")
+    #         num_frames = 14 if version == "svd" else 25
+    # else:
+    #     num_frames = int(num_frames)
+
+    # Convert text_prompts from Fire list string format to Python list if needed
+    if isinstance(text_prompts, str):
+        if text_prompts == "None" or text_prompts == "":
+            text_prompts = None
+        elif text_prompts.startswith("[") and text_prompts.endswith("]"):
+            # Parse Fire list format: [item1,item2] -> ["item1", "item2"]
+            import ast
+            try:
+                # Convert to proper Python list syntax and evaluate
+                text_prompts = ast.literal_eval(text_prompts)
+            except (ValueError, SyntaxError):
+                print(f"Warning: Could not parse text_prompts: {text_prompts}")
+                text_prompts = None
 
     os.makedirs(output_folder, exist_ok=True)
 
@@ -1068,18 +1278,39 @@ def sample(
 
     mask_arms = None
     if fix_occlusion:
+        print("Using SAM2 for occlusion fixing...")
         mask_arms = get_segmentation_mask_arms(
             video_path,
             start_frame,
             position,
             original_len,
             (h, w),
-            target_size=(64, 64),
+            target_size=(512, 512),
         )
 
         if save_occlusion_mask:
             video_name = os.path.basename(video_path).replace(".mp4", "")
-            output_path = f"/vol/paramonos2/projects/antoni/code/Personal/keyface/outputs/{video_name}_mask_arms.npy"
+            output_path = f"/outputs/{video_name}_mask_arms.npy"
+            os.makedirs("outputs", exist_ok=True)
+            np.save(output_path, mask_arms)
+
+        mask_arms = mask_arms[:max_frames]
+    
+    elif fix_occlusion_pro:
+        print("Using SAM3 for enhanced occlusion fixing...")
+        mask_arms = get_segmentation_mask_arms_sam3(
+            video_path=video_path,
+            ann_frame_idx=start_frame,
+            position=position,
+            text_prompts=text_prompts,
+            video_len=original_len,
+            video_size=(h, w),
+        )
+
+        if save_occlusion_mask:
+            video_name = os.path.basename(video_path).replace(".mp4", "")
+            output_path = f"outputs/{video_name}_mask_arms_sam3.npy"
+            os.makedirs("outputs", exist_ok=True)
             np.save(output_path, mask_arms)
 
         mask_arms = mask_arms[:max_frames]
@@ -1498,7 +1729,9 @@ def main(
     mix_audio: bool = False,
     what_mask: str = "box",
     fix_occlusion: bool = False,
+    fix_occlusion_pro: bool = False,
     position: Optional[List[float]] = None,
+    text_prompts: Optional[List[str]] = None,
     start_frame: int = 0,
     gt_as_cond: bool = False,
     nose_index: int = 28,
@@ -1671,7 +1904,9 @@ def main(
                 else "",
                 what_mask=what_mask,
                 fix_occlusion=fix_occlusion,
+                fix_occlusion_pro=fix_occlusion_pro,
                 position=position,
+                text_prompts=text_prompts,
                 start_frame=start_frame,
                 gt_as_cond=gt_as_cond,
                 nose_index=nose_index,

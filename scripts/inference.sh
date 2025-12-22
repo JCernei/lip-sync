@@ -8,7 +8,9 @@ DEFAULT_INTERPOLATION_CKPT="None"
 DEFAULT_COMPUTE_UNTIL="45"
 DEFAULT_FILE_LIST_AUDIO="None"
 DEFAULT_FIX_OCCLUSION="False"
+DEFAULT_FIX_OCCLUSION_PRO="False"
 DEFAULT_POSITION="None"
+DEFAULT_TEXT_PROMPTS="None"
 DEFAULT_START_FRAME="0"
 
 # Parse command-line arguments
@@ -42,8 +44,16 @@ while [[ $# -gt 0 ]]; do
             fix_occlusion="${2:-$DEFAULT_FIX_OCCLUSION}"
             shift 2
             ;;
+        --fix_occlusion_pro)
+            fix_occlusion_pro="${2:-$DEFAULT_FIX_OCCLUSION_PRO}"
+            shift 2
+            ;;
         --position)
             position="${2:-$DEFAULT_POSITION}"
+            shift 2
+            ;;
+        --text_prompts)
+            text_prompts="${2:-$DEFAULT_TEXT_PROMPTS}"
             shift 2
             ;;
         --start_frame)
@@ -64,7 +74,11 @@ interpolation_ckpt=${interpolation_ckpt:-$DEFAULT_INTERPOLATION_CKPT}
 compute_until=${compute_until:-$DEFAULT_COMPUTE_UNTIL}
 file_list_audio=${file_list_audio:-$DEFAULT_FILE_LIST_AUDIO}
 fix_occlusion=${fix_occlusion:-$DEFAULT_FIX_OCCLUSION}
+fix_occlusion_pro=${fix_occlusion_pro:-$DEFAULT_FIX_OCCLUSION_PRO}
 position=${position:-$DEFAULT_POSITION}
+if [ -z "${text_prompts[@]}" ]; then
+    text_prompts=("$DEFAULT_TEXT_PROMPTS")
+fi
 start_frame=${start_frame:-$DEFAULT_START_FRAME}
 
 # Check if output_folder is provided
@@ -98,5 +112,7 @@ python scripts/sampling/dubbing_pipeline.py \
     --audio_emb_type=hubert \
     --recompute=True \
     --fix_occlusion=${fix_occlusion} \
+    --fix_occlusion_pro=${fix_occlusion_pro} \
     --position=${position} \
+    --text_prompts="${text_prompts}" \
     --start_frame=${start_frame}

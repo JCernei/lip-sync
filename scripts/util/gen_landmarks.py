@@ -68,12 +68,8 @@ def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
                             key=lambda idx: abs(idx - len(all_landmarks) - i),
                         )
                         batch_landmarks[i] = all_landmarks[closest_idx]
-                    elif (
-                        len(batch_landmarks) > i + 1
-                        and batch_landmarks[i + 1] is not None
-                        and len(batch_landmarks[i + 1]) > 0
-                    ):
-                        # Use the next valid landmark in the current batch if available
+                    else:
+                        # Look ahead in current batch for valid landmarks
                         next_valid_idx = next(
                             (
                                 j
@@ -86,17 +82,11 @@ def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
                         if next_valid_idx is not None:
                             batch_landmarks[i] = batch_landmarks[next_valid_idx]
                         else:
-                            # If no valid landmarks found, set an error
-                            raise ValueError(
-                                f"Error: No valid landmarks found for frame {_ - len(frames_batch) + i + 1} in {video_path}"
+                            # If no valid landmarks found, use zeros as fallback
+                            print(
+                                f"Warning: No valid landmarks found for frame {_ - len(frames_batch) + i + 1} in {video_path}. Using zero landmarks."
                             )
                             batch_landmarks[i] = np.zeros((68, 2))
-                    else:
-                        # If no valid landmarks found, set an error
-                        raise ValueError(
-                            f"Error: No valid landmarks found for frame {_ - len(frames_batch) + i + 1} in {video_path}"
-                        )
-                        batch_landmarks[i] = np.zeros((68, 2))
 
                 # If multiple faces detected, use the first one
                 if isinstance(batch_landmarks[i], list) and len(batch_landmarks[i]) > 0:
@@ -104,7 +94,7 @@ def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
 
                 # Ensure the landmark has the correct shape (68x2)
                 if batch_landmarks[i].shape != (68, 2):
-                    # If the shape is wrong, use the closest valid landmark or set an error
+                    # If the shape is wrong, use the closest valid landmark or look ahead in batch
                     valid_indices = [
                         j
                         for j, lm in enumerate(all_landmarks)
@@ -119,10 +109,27 @@ def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
                         )
                         batch_landmarks[i] = all_landmarks[closest_idx]
                     else:
-                        raise ValueError(
-                            f"Error: No valid landmarks with shape (68, 2) found for frame {_ - len(frames_batch) + i + 1} in {video_path}"
+                        # Look ahead in current batch for valid landmarks
+                        future_valid_idx = next(
+                            (
+                                j
+                                for j in range(i + 1, len(batch_landmarks))
+                                if (
+                                    batch_landmarks[j] is not None
+                                    and hasattr(batch_landmarks[j], "shape")
+                                    and batch_landmarks[j].shape == (68, 2)
+                                )
+                            ),
+                            None,
                         )
-                        batch_landmarks[i] = np.zeros((68, 2))
+                        if future_valid_idx is not None:
+                            batch_landmarks[i] = batch_landmarks[future_valid_idx]
+                        else:
+                            # Use zero landmarks as last resort
+                            print(
+                                f"Warning: No valid landmarks with shape (68, 2) found for frame {_ - len(frames_batch) + i + 1} in {video_path}. Using zero landmarks."
+                            )
+                            batch_landmarks[i] = np.zeros((68, 2))
 
             all_landmarks.extend(batch_landmarks)
 
